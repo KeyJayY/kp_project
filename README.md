@@ -1,12 +1,8 @@
-usage: 
+# Usage
 
-1. `start_socat.sh` - Simulates a pair of connected serial ports using `socat`
-
-2. `script.py` - Listens on a virtual serial port and sends a random number whenever it receives the ? command.
-
-3. example sending to virtual port:
-```
-# Sends '?' to the virtual serial port and shows the response.
+```sh
+./start_socat.sh  # replace /dev/pts/{1,2} with returned virtual devices from socat
+python3 script.py /dev/pts/1
 cat < /dev/pts/2 &
-echo -n "?" > /dev/pts/2
+echo 'SWEEP 0 4095 256 0 4095 256' > /dev/pts/2
 ```

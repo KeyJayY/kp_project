@@ -1,27 +1,155 @@
 #!/usr/bin/env python3
-import os
-import time
-import random
+from pathlib import Path
+import sys
+import threading
+from typing import TYPE_CHECKING
 
-device = "/dev/pts/5"
-print(f"Opening {device} for read/write...")
+import matplotlib.pyplot as plt
+import numpy as np
+from pytransform3d.plot_utils import make_3d_axis, plot_vector
+from pytransform3d.rotations import matrix_from_axis_angle
 
-with open(device, "r+b", buffering=0) as port:
-    print("Listening... (send '?' from the other end)")
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from mpl_toolkits.mplot3d.axes3d import Axes3D
 
+REVOLUTION_STEPS = 4096
+
+
+def rot(v: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+    axis = axis / np.linalg.norm(axis)
+    return matrix_from_axis_angle(np.hstack((axis, angle))) @ v
+
+
+def get_arm_positions(
+    phi: float, theta: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    A = np.array([0, 4, 0])
+    B = np.array([0, -4, 1])
+    C = np.array([0, 0, 0.5])
+    Cd = np.array([0, 1, 0])
+    Cr = rot(C, Cd, phi)
+    D = np.array([0, 1, 0])
+    Dr = rot(D, Cr, theta)
+    pA = A
+    pB = pA + B
+    pC = pB + Cr
+    return A, pA, B, pB, Cr, pC, Dr
+
+
+def int_to_angle(val: int, min_angle: float = -np.pi, max_angle: float = np.pi) -> float:
+    val = max(0, min(REVOLUTION_STEPS - 1, val))
+    return min_angle + (max_angle - min_angle) * (val / REVOLUTION_STEPS)
+
+
+def draw_arm(ax: Axes3D, phi: float, theta: float) -> None:
+    A, pA, B, pB, Cr, pC, Dr = get_arm_positions(phi, theta)
+    ax.cla()
+    ax.set_xlim((-2, 2))
+    ax.set_ylim((-2, 2))
+    ax.set_zlim((-2, 2))
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    origin = np.zeros(3)
+    plot_vector(ax, origin, A, color="r", label="A")
+    plot_vector(ax, pA, B, color="g", label="B")
+    plot_vector(ax, pB, Cr, color="b", label="C_rotated")
+    plot_vector(ax, pC, Dr, color="y", label="D_rotated")
+    ax.legend()
+
+
+def sweep_pairs(a: int, b: int, c: int, d: int, e: int, f: int) -> Generator[tuple[int, int]]:
+    i = 0
+    pos = c > 0
     while True:
-        data = port.read(1)
-        if not data:
-            time.sleep(0.01)
-            continue
-        if data == b'?':
-            num = random.randint(0, 999)
-            msg = f"{num}\n".encode()
-            port.write(msg)
-            port.flush()
-            print(f"Received '?', sent: {num}")
-        elif data in (b'q', b'Q'):
-            print("Received 'q' -> exiting.")
+        x = a + i * c
+        if x >= b if pos else x <= b:
             break
+        if i % 2 == 0:
+            yield from ((x, y) for y in range(d, e + 1, f))
         else:
-            continue
+            yield from ((x, y) for y in range(e, d - 1, -f))
+        i += 1
+
+
+def raycast(v: np.ndarray, dir_: np.ndarray) -> int:
+    return int(np.linalg.norm(v + dir_) * 100)
+
+
+class WorkerThread(threading.Thread):
+    def __init__(self, data_ready: threading.Event, data_ack: threading.Event, port: str) -> None:
+        super().__init__()
+        self.daemon = True
+        self.latest = (0.0, 0.0)
+        self.running = True
+        self.data_ready = data_ready
+        self.data_ack = data_ack
+        self.port = port
+
+    def run(self) -> None:
+        with Path(self.port).open("r+b", buffering=0) as port:
+            while self.running:
+                try:
+                    line = port.readline()
+                    port.write(b"\nL\n")
+                    if not line:
+                        break
+                    parts = line.decode("852").strip().split()
+                    if len(parts) != 7 or parts[0] != "SWEEP":
+                        continue
+                    parts = parts[1:]
+                    try:
+                        a, b, c, d, e, f = map(int, parts)
+                        if (
+                            not all(0 <= v <= REVOLUTION_STEPS - 1 for v in (a, b, d, e, f))
+                            or not -REVOLUTION_STEPS + 1 <= c <= REVOLUTION_STEPS
+                        ):
+                            raise ValueError
+                    except ValueError:
+                        port.write(b"\nI\n")
+                        continue
+
+                    for phi_int, theta_int in sweep_pairs(a, b, c, d, e, f):
+                        phi = int_to_angle(phi_int)
+                        theta = int_to_angle(theta_int)
+                        _, _, _, _, _, pC, Dr = get_arm_positions(phi, theta)
+                        length = raycast(pC, Dr)
+                        port.write(f"\nR {phi_int} {theta_int} {length}\n".encode())
+                        self.latest = (phi, theta)
+                        self.data_ready.set()
+                        self.data_ack.wait()
+                        self.data_ack.clear()
+                except KeyboardInterrupt:
+                    self.running = False
+                    break
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        print(f"usage: {sys.argv[0]} /dev/...")
+        sys.exit(1)
+    port = sys.argv[1]
+    ax = make_3d_axis(ax_s=2, unit="m")
+    data_ready = threading.Event()
+    data_ack = threading.Event()
+
+    worker_thread = WorkerThread(data_ready, data_ack, port)
+    worker_thread.start()
+    draw_arm(ax, 0.0, 0.0)
+    plt.ion()
+    plt.show()
+    try:
+        while worker_thread.running:
+            plt.pause(0.01)
+            if data_ready.is_set():
+                phi, theta = worker_thread.latest
+                draw_arm(ax, phi, theta)
+                data_ready.clear()
+                data_ack.set()
+    except KeyboardInterrupt:
+        worker_thread.running = False
+
+
+if __name__ == "__main__":
+    main()

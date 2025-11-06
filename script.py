@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 from pathlib import Path
 import sys
 import threading
@@ -64,7 +66,7 @@ def sweep_pairs(a: int, b: int, c: int, d: int, e: int, f: int) -> Generator[tup
     pos = c > 0
     while True:
         x = a + i * c
-        if x >= b if pos else x <= b:
+        if x > b if pos else x < b:
             break
         if i % 2 == 0:
             yield from ((x, y) for y in range(d, e + 1, f))
@@ -73,8 +75,41 @@ def sweep_pairs(a: int, b: int, c: int, d: int, e: int, f: int) -> Generator[tup
         i += 1
 
 
+def ray_intersect_cube(ray_origin: np.ndarray, ray_dir: np.ndarray, cube_min: np.ndarray, cube_max: np.ndarray) -> np.ndarray | None:
+    dir_fraction = np.empty(3)
+    dir_fraction[ray_dir != 0] = 1.0 / ray_dir[ray_dir != 0]
+    dir_fraction[ray_dir == 0] = np.inf  # direction parallel to an axis
+
+    t1 = (cube_min[0] - ray_origin[0]) * dir_fraction[0]
+    t2 = (cube_max[0] - ray_origin[0]) * dir_fraction[0]
+    t3 = (cube_min[1] - ray_origin[1]) * dir_fraction[1]
+    t4 = (cube_max[1] - ray_origin[1]) * dir_fraction[1]
+    t5 = (cube_min[2] - ray_origin[2]) * dir_fraction[2]
+    t6 = (cube_max[2] - ray_origin[2]) * dir_fraction[2]
+
+    tmin = max(min(t1, t2), min(t3, t4), min(t5, t6))
+    tmax = min(max(t1, t2), max(t3, t4), max(t5, t6))
+
+    if tmax < 0:
+        return None
+    if tmin > tmax:
+        return None
+
+    t_hit = tmin if tmin >= 0 else tmax
+    intersection = ray_origin + t_hit * ray_dir
+    return intersection
+
+
 def raycast(v: np.ndarray, dir_: np.ndarray) -> int:
-    return int(np.linalg.norm(v + dir_) * 100)
+    room_min = np.array([-100, -200, -50])
+    room_max = np.array([+200, +300, +150])
+    table_min = np.array([-50, -50, -50])
+    table_max = np.array([+50, +50, +0])
+    room_intersection = ray_intersect_cube(v, dir_, room_min, room_max)
+    table_intersection = ray_intersect_cube(v, dir_, table_min, table_max)
+    room_distance = np.linalg.norm(room_intersection - v) if room_intersection is not None else np.inf
+    table_distance = np.linalg.norm(table_intersection - v) if table_intersection is not None else np.inf
+    return int(min(room_distance, table_distance, 1023.0))
 
 
 class WorkerThread(threading.Thread):

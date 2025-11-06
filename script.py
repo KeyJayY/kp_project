@@ -3,7 +3,7 @@ import os
 import time
 import random
 
-device = "/dev/pts/1"
+device = "/dev/pts/5"
 print(f"Opening {device} for read/write...")
 
 with open(device, "r+b", buffering=0) as port:

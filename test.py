@@ -2,38 +2,28 @@ import open3d as o3d
 import numpy as np
 import time
 
-def load_ply_points(filename):
-    with open(filename, "r") as f:
-        lines = f.readlines()
-    start_idx = next(i for i, line in enumerate(lines) if line.strip() == "end_header") + 1
-    points = []
-    for line in lines[start_idx:]:
-        parts = line.strip().split()
-        if len(parts) != 3:
-            continue
-        x, y, z = map(float, parts)
-        points.append([x, y, z])
-    return np.array(points)
+bunny_points = np.loadtxt("bunny.ply", skiprows=next(i for i, line in enumerate(open("bunny.ply")) if line.strip() == "end_header") + 1)
+bunny_points *= 1000
 
-bunny_points = load_ply_points("bunny.ply")
-bunny_points *= 1000 
+app = o3d.visualization.gui.Application.instance
+app.initialize()
+
+window = app.create_window("Bunny Viewer", 1000, 800)
+scene = o3d.visualization.gui.SceneWidget()
+scene.scene = o3d.visualization.rendering.Open3DScene(window.renderer)
+window.add_child(scene)
 
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(bunny_points)
+scene.scene.add_geometry("bunny", pcd, o3d.visualization.rendering.MaterialRecord())
 
-vis = o3d.visualization.Visualizer()
-vis.create_window(window_name="Bunny Point Cloud", width=800, height=600)
-vis.add_geometry(pcd)
-vis.reset_view_point(True) 
+def update_geometry():
+    for i in range(1, len(bunny_points), 500):
+        subset = bunny_points[:i]
+        pcd.points = o3d.utility.Vector3dVector(subset)
+        scene.scene.remove_geometry("bunny")
+        scene.scene.add_geometry("bunny", pcd, o3d.visualization.rendering.MaterialRecord())
+        time.sleep(0.01)
 
-
-for i in range(1, len(bunny_points), 500): 
-    subset = bunny_points[:i]
-    pcd.points = o3d.utility.Vector3dVector(subset)
-    vis.update_geometry(pcd)
-    vis.poll_events()
-    vis.update_renderer()
-    time.sleep(0.01)
-
-vis.run()
-vis.destroy_window()
+app.post_to_main_thread(window, update_geometry)
+app.run()

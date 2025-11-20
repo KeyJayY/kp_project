@@ -6,14 +6,18 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 from queue import Queue
+
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+
 import open3d as o3d
 import numpy as np
+from PIL import Image, ImageTk
 
 REVOLUTION_STEPS = 4096
 BAUDRATE = 9600
 TIMEOUT = 1
+
 
 class MathUtils:
     @staticmethod
@@ -109,6 +113,89 @@ class SerialReader(threading.Thread):
             except:
                 pass
 
+
+class EmbeddedOpen3D:
+    def __init__(self, parent, width=500, height=400):
+        self.parent = parent
+        self.width = width
+        self.height = height
+        
+        self.panel = tk.Label(parent)
+        self.panel.pack(fill=tk.BOTH, expand=True)
+
+        self.vis = o3d.visualization.Visualizer()
+        self.vis.create_window(width=self.width, height=self.height, visible=False)
+
+        opt = self.vis.get_render_option()
+        opt.background_color = np.asarray([0, 0, 0])
+        opt.point_size = 2.0
+
+        self.panel.bind("<Button-1>", self.on_mouse_press)
+        self.panel.bind("<B1-Motion>", self.on_mouse_drag)
+        self.panel.bind("<MouseWheel>", self.on_mouse_wheel) 
+        self.panel.bind("<Button-4>", self.on_mouse_wheel)
+        self.panel.bind("<Button-5>", self.on_mouse_wheel)
+
+        self.last_mouse_x = 0
+        self.last_mouse_y = 0
+        
+        self.pcd = None
+
+        self.render_image()
+
+    def update_geometry(self, points):
+        if points.shape[0] == 0:
+            return
+
+        if self.pcd is None:
+            self.pcd = o3d.geometry.PointCloud()
+            self.pcd.points = o3d.utility.Vector3dVector(points)
+            self.vis.add_geometry(self.pcd)
+            self.vis.reset_view_point(True)
+        else:
+            self.pcd.points = o3d.utility.Vector3dVector(points)
+            self.vis.update_geometry(self.pcd)
+
+        self.render_image()
+
+    def render_image(self):
+        self.vis.poll_events()
+        self.vis.update_renderer()
+        
+        img_data = self.vis.capture_screen_float_buffer(do_render=True)
+        img_data = (np.asarray(img_data) * 255).astype(np.uint8)
+        
+        img_pil = Image.fromarray(img_data)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+        
+        self.panel.configure(image=img_tk)
+        self.panel.image = img_tk
+
+    def on_mouse_press(self, event):
+        self.last_mouse_x = event.x
+        self.last_mouse_y = event.y
+
+    def on_mouse_drag(self, event):
+        dx = event.x - self.last_mouse_x
+        dy = event.y - self.last_mouse_y
+        
+        ctr = self.vis.get_view_control()
+        ctr.rotate(dx * 5.0, dy * 5.0)
+        
+        self.last_mouse_x = event.x
+        self.last_mouse_y = event.y
+        self.render_image()
+
+    def on_mouse_wheel(self, event):
+        ctr = self.vis.get_view_control()
+        if event.num == 5 or event.delta < 0:
+            ctr.scale(-1.0)
+        elif event.num == 4 or event.delta > 0:
+            ctr.scale(1.0)
+            
+        self.render_image()
+
+
 class LidarApp:
     def __init__(self, port):
         self.port = port
@@ -120,10 +207,16 @@ class LidarApp:
 
         self.root = tk.Tk()
         self.root.title("3D LIDAR Simulation Viewer")
-        self.root.geometry("1200x850")
+        self.root.geometry("1400x900")
 
-        frame_plot = ttk.Frame(self.root)
-        frame_plot.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.main_viz_frame = tk.Frame(self.root)
+        self.main_viz_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.frame_mpl = tk.Frame(self.main_viz_frame, bg="white")
+        self.frame_mpl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.frame_o3d = tk.Frame(self.main_viz_frame, bg="black")
+        self.frame_o3d.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         self.frame_controls = ttk.Frame(self.root)
         self.frame_controls.pack(side=tk.TOP, fill=tk.X, pady=5)
@@ -131,9 +224,9 @@ class LidarApp:
         frame_logs = ttk.Frame(self.root)
         frame_logs.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
 
-        self.fig = Figure(figsize=(6, 6))
+        self.fig = Figure(figsize=(5, 5))
         self.ax = self.fig.add_subplot(111, projection="3d")
-        self.ax.set_title("LIDAR Sweep Data")
+        self.ax.set_title("Live LIDAR Data (Matplotlib)")
         self.ax.set_xlim(-1000, 1000)
         self.ax.set_ylim(-1000, 1000)
         self.ax.set_zlim(-1000, 1000)
@@ -143,10 +236,12 @@ class LidarApp:
         self.ax.set_ylabel("Y")
         self.ax.set_zlabel("Z")
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=frame_plot)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_mpl)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.log_text = tk.Text(frame_logs, height=10, state=tk.DISABLED)
+        self.o3d_viewer = EmbeddedOpen3D(self.frame_o3d)
+
+        self.log_text = tk.Text(frame_logs, height=8, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(frame_logs, command=self.log_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -162,7 +257,8 @@ class LidarApp:
         ttk.Button(self.frame_controls, text="Start", command=self.start).pack(side=tk.LEFT, padx=10)
         ttk.Button(self.frame_controls, text="Stop", command=self.stop).pack(side=tk.LEFT, padx=10)
         ttk.Button(self.frame_controls, text="Save PLY", command=self.save_ply).pack(side=tk.LEFT, padx=10)
-        ttk.Button(self.frame_controls, text="Show Open3D", command=self.show_open3d).pack(side=tk.LEFT, padx=10)
+        
+        ttk.Button(self.frame_controls, text="Show/Update Open3D", command=self.show_open3d).pack(side=tk.LEFT, padx=10)
 
         self.root.after(10, self.process_queue)
         self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
@@ -181,7 +277,7 @@ class LidarApp:
 
     def _add_control(self, label, default):
         ttk.Label(self.frame_controls, text=label).pack(side=tk.LEFT)
-        entry = ttk.Entry(self.frame_controls, width=6)
+        entry = ttk.Entry(self.frame_controls, width=5)
         entry.insert(0, default)
         entry.pack(side=tk.LEFT, padx=2)
         return entry
@@ -190,7 +286,7 @@ class LidarApp:
         self.ax.cla()
         self.ax.scatter(self.x_data, self.y_data, self.z_data, s=5)
         self.ax.scatter([0], [0], [0], s=80, color="red")
-        self.ax.set_title("LIDAR Sweep Data")
+        self.ax.set_title("Live LIDAR Data (Matplotlib)")
         self.canvas.draw_idle()
 
     def process_queue(self):
@@ -234,7 +330,7 @@ class LidarApp:
         self.x_data.clear()
         self.y_data.clear()
         self.z_data.clear()
-
+        
         self.serial_thread = SerialReader(self.port, params, self.queue)
         self.serial_thread.start()
 
@@ -268,22 +364,18 @@ class LidarApp:
         self._real_log(f"Saved point cloud to {filename}")
 
     def show_open3d(self):
+        """
+        Takes the current data gathered by the serial thread
+        and updates the embedded Open3D viewer on the right.
+        """
         if not self.x_data:
-            self._real_log("No data to display.")
+            self._real_log("No data to display in Open3D.")
             return
 
-        filename = "scan_output.ply"
-        self.save_ply()
+        points = np.vstack((self.x_data, self.y_data, self.z_data)).T
 
-        points = np.loadtxt(
-            filename,
-            skiprows=next(i for i, line in enumerate(open(filename)) if line.strip() == "end_header") + 1
-        )
-
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-
-        o3d.visualization.draw_geometries([pcd])
+        self.o3d_viewer.update_geometry(points)
+        self._real_log(f"Updated Open3D view with {len(points)} points.")
 
     def exit_app(self):
         self.stop()

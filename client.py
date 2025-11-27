@@ -9,6 +9,8 @@ from queue import Queue
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+import matplotlib.cm as cm
+import matplotlib
 
 import open3d as o3d
 import numpy as np
@@ -71,6 +73,9 @@ class SerialReader(threading.Thread):
 
         while not self.stop_flag:
             try:
+                if not self.ser or not self.ser.is_open:
+                    break
+
                 line = self.ser.readline().decode(errors="ignore").strip()
                 if not line:
                     continue
@@ -92,10 +97,14 @@ class SerialReader(threading.Thread):
                     except ValueError:
                         pass
 
-            except serial.SerialException:
-                self.put("log", "Serial connection lost.")
-                break
+            except (serial.SerialException, TypeError, OSError):
+                if self.stop_flag:
+                    break
+                else:
+                    self.put("log", "Serial connection lost (Error).")
+                    break
 
+        # Cleanup
         if self.ser and self.ser.is_open:
             try:
                 self.ser.close()
@@ -115,7 +124,7 @@ class SerialReader(threading.Thread):
 
 
 class EmbeddedOpen3D:
-    def __init__(self, parent, width=500, height=400):
+    def __init__(self, parent, width=700, height=600):
         self.parent = parent
         self.width = width
         self.height = height
@@ -127,8 +136,8 @@ class EmbeddedOpen3D:
         self.vis.create_window(width=self.width, height=self.height, visible=False)
 
         opt = self.vis.get_render_option()
-        opt.background_color = np.asarray([0, 0, 0])
-        opt.point_size = 2.0
+        opt.background_color = np.asarray([1.0, 1.0, 1.0])
+        opt.point_size = 5.0
 
         self.panel.bind("<Button-1>", self.on_mouse_press)
         self.panel.bind("<B1-Motion>", self.on_mouse_drag)
@@ -146,14 +155,33 @@ class EmbeddedOpen3D:
     def update_geometry(self, points):
         if points.shape[0] == 0:
             return
+            
+        z_vals = points[:, 2]
+        min_z = np.min(z_vals)
+        max_z = np.max(z_vals)
+        z_range = max_z - min_z
+        
+        if z_range == 0:
+            z_range = 1.0
+            
+        norm_z = (z_vals - min_z) / z_range
+        
+        try:
+            colormap = matplotlib.colormaps['jet']
+        except AttributeError:
+            colormap = cm.get_cmap("jet")
+
+        colors = colormap(norm_z)[:, :3]
 
         if self.pcd is None:
             self.pcd = o3d.geometry.PointCloud()
             self.pcd.points = o3d.utility.Vector3dVector(points)
+            self.pcd.colors = o3d.utility.Vector3dVector(colors)
             self.vis.add_geometry(self.pcd)
             self.vis.reset_view_point(True)
         else:
             self.pcd.points = o3d.utility.Vector3dVector(points)
+            self.pcd.colors = o3d.utility.Vector3dVector(colors)
             self.vis.update_geometry(self.pcd)
 
         self.render_image()
@@ -212,11 +240,15 @@ class LidarApp:
         self.main_viz_frame = tk.Frame(self.root)
         self.main_viz_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        self.main_viz_frame.columnconfigure(0, weight=1, uniform="equal_split")
+        self.main_viz_frame.columnconfigure(1, weight=1, uniform="equal_split")
+        self.main_viz_frame.rowconfigure(0, weight=1)
+
         self.frame_mpl = tk.Frame(self.main_viz_frame, bg="white")
-        self.frame_mpl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.frame_mpl.grid(row=0, column=0, sticky="nsew")
 
         self.frame_o3d = tk.Frame(self.main_viz_frame, bg="black")
-        self.frame_o3d.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.frame_o3d.grid(row=0, column=1, sticky="nsew")
 
         self.frame_controls = ttk.Frame(self.root)
         self.frame_controls.pack(side=tk.TOP, fill=tk.X, pady=5)
@@ -239,7 +271,7 @@ class LidarApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_mpl)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.o3d_viewer = EmbeddedOpen3D(self.frame_o3d)
+        self.o3d_viewer = EmbeddedOpen3D(self.frame_o3d, width=700, height=650)
 
         self.log_text = tk.Text(frame_logs, height=8, state=tk.DISABLED)
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -364,10 +396,6 @@ class LidarApp:
         self._real_log(f"Saved point cloud to {filename}")
 
     def show_open3d(self):
-        """
-        Takes the current data gathered by the serial thread
-        and updates the embedded Open3D viewer on the right.
-        """
         if not self.x_data:
             self._real_log("No data to display in Open3D.")
             return

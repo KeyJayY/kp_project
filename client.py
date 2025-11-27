@@ -16,8 +16,8 @@ import open3d as o3d
 import numpy as np
 from PIL import Image, ImageTk
 
-REVOLUTION_STEPS = 4096
-BAUDRATE = 9600
+REVOLUTION_STEPS = 200
+BAUDRATE = 115200
 TIMEOUT = 1
 
 
@@ -28,7 +28,7 @@ class MathUtils:
 
     @staticmethod
     def int_to_angle(val, steps=REVOLUTION_STEPS, min_angle=-math.pi, max_angle=math.pi):
-        val = max(0, min(steps - 1, val))
+        val = ((val % REVOLUTION_STEPS) + REVOLUTION_STEPS) % REVOLUTION_STEPS
         return min_angle + (max_angle - min_angle) * (val / steps)
 
     @staticmethod
@@ -59,7 +59,7 @@ class SerialReader(threading.Thread):
             return
 
         self.put("log", f"Connected to {self.port} at {BAUDRATE} baud.")
-        time.sleep(1)
+        time.sleep(2)
 
         sweep_cmd = f"SWEEP {' '.join(str(p) for p in self.parameters)}\n"
         try:
@@ -80,9 +80,9 @@ class SerialReader(threading.Thread):
                 if not line:
                     continue
 
-                self.put("log", line)
-
                 parts = line.split()
+                self.put("log", line)
+                
                 if len(parts) == 4 and parts[0] == "R":
                     try:
                         phi_int = int(parts[1])
@@ -92,19 +92,23 @@ class SerialReader(threading.Thread):
                         phi = MathUtils.int_to_angle(phi_int)
                         theta = MathUtils.int_to_angle(theta_int)
                         x, y, z = MathUtils.spherical_to_cartesian(r, theta, phi)
+                        print(f"{phi:.2f}, {theta:.2f}, {r:.2f}, x,y,z")
 
                         self.put("point", (x, y, z))
                     except ValueError:
-                        pass
+                        self.put("log", f"Corrupted packet data: {line}")
+                else:
+                    self.put("log", f"Garbage ignored: {line}")
 
-            except (serial.SerialException, TypeError, OSError):
+            except (serial.SerialException, TypeError, OSError) as e:
                 if self.stop_flag:
                     break
                 else:
-                    self.put("log", "Serial connection lost (Error).")
+                    self.put("log", f"Serial connection lost: {e}")
                     break
+            except Exception as e:
+                self.put("log", f"Unexpected error: {e}")
 
-        # Cleanup
         if self.ser and self.ser.is_open:
             try:
                 self.ser.close()

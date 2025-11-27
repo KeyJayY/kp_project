@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -144,7 +145,13 @@ class WorkerThread(threading.Thread):
                     except ValueError:
                         port.write(b"\nI\n")
                         continue
-
+                    data = Path("skan.txt").open().readlines()
+                    for line in data:
+                        time.sleep(0.05)
+                        port.write(line.encode())
+                        port.flush()
+                    port.flush()
+                    continue
                     for phi_int, theta_int in sweep_pairs(a, b, c, d, e, f):
                         phi = int_to_angle(phi_int)
                         theta = int_to_angle(theta_int)

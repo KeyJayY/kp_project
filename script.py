@@ -151,6 +151,7 @@ class WorkerThread(threading.Thread):
                         _, _, _, _, _, pC, Dr = get_arm_positions(phi, theta)
                         length = raycast(pC, Dr)
                         port.write(f"\nR {phi_int} {theta_int} {length}\n".encode())
+                        # port.write(f"y+")
                         self.latest = (phi, theta)
                         self.data_ready.set()
                         self.data_ack.wait()
